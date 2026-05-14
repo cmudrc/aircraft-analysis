@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  qa:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install dev deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest ruff
+
+      - name: Ruff lint (cross-platform)
+        run: python -m ruff check ovs tests
+
+      - name: Pytest -- OVS library smoke tests
+        run: python -m pytest tests/ -q -o "addopts="
