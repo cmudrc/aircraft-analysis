@@ -62,14 +62,20 @@ No two MCPs write to the same XPath, preventing conflicts.
 
 | Dependency | Install |
 |-----------|---------|
-| Python >= 3.12 | — |
-| SU2_CFD | `~/.local/su2/bin/SU2_CFD` |
-| Gmsh | `brew install gmsh` or `pip install gmsh` |
+| Python >= 3.12 (3.13 OK) | macOS: `brew install python@3.13`. Linux: `apt-get install python3.13 python3.13-venv`. Windows: from https://python.org, or `winget install Python.Python.3.13`. |
+| SU2_CFD | Linux/macOS: run `bash su2-mcp/scripts/install_su2.sh` (conda preferred, falls back to binary download). Windows: install via WSL2 (`wsl --install`), then run the same script inside WSL. |
+| Gmsh | `brew install gmsh` (macOS), `apt-get install gmsh` (Linux), or `pip install gmsh` (all platforms; bundles a private binary). |
 | OpenMDAO + pyCycle | `pip install openmdao==3.36.0 om-pycycle` |
 | Aviary (optional) | `pip install aviary==0.9.10 dymos==1.13.1` |
+| Ollama (for the agent layer) | macOS: `brew install ollama`. Linux: `curl -fsSL https://ollama.com/install.sh \| sh`. Windows: `winget install Ollama.Ollama`. |
 
 > **Critical**: Aviary requires `openmdao==3.36.0` and `dymos==1.13.1`.
 > Newer versions cause unit-compatibility errors.
+
+> **One-command shortcut**: run `bash bootstrap.sh` (POSIX) or
+> `pwsh bootstrap.ps1` (Windows) at the project root and the script
+> will install everything in the table above, pull the Gemma model,
+> and launch the agent. See [`cmudrc/agent-mcp`](https://github.com/cmudrc/agent-mcp).
 
 ### Install MCPs
 

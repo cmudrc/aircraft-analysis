@@ -13,3 +13,7 @@ env/
 venv/
 pipeline_output/
 *.log
+
+# macOS Finder metadata
+.DS_Store
+**/.DS_Store

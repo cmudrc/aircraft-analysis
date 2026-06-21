@@ -30,7 +30,14 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
-for sub in ("tigl-mcp/src", "su2-mcp/src", "pycycle-mcp/src", "mission-mcp/src"):
+for sub in (
+    "tigl-mcp/src",
+    "su2-mcp/src",
+    "pycycle-mcp/src",
+    "nseg-mcp/src",
+    "aviary-cpacs-mcp/src",
+    "mission-mcp/src",  # legacy, kept for back-compat with --mcps mission
+):
     p = _PROJECT_ROOT / sub
     if p.is_dir() and str(p) not in sys.path:
         sys.path.insert(0, str(p))
@@ -65,6 +72,36 @@ def _find_existing_artifacts(cpacs_path: str) -> dict[str, str | None]:
     return artifacts
 
 
+def _load_converge_harness():
+    """Locate and import the open-ended SU2 refinement harness.
+
+    The script lives at ``scripts/run_converged_su2.py`` next to either
+    this orchestrator (workspace layout) or the aircraft-analysis repo
+    root. We resolve it via importlib so the orchestrator does not need
+    the harness to be installed as a package.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parent.parent / "scripts" / "run_converged_su2.py",          # workspace root layout
+        here.parent.parent / "aircraft-analysis" / "scripts" / "run_converged_su2.py",
+        here.parent / "scripts" / "run_converged_su2.py",
+    ]
+    for p in candidates:
+        if p.exists():
+            spec = importlib.util.spec_from_file_location("_converge_harness", p)
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return mod.run_loop
+    raise FileNotFoundError(
+        "Could not locate scripts/run_converged_su2.py. Searched: "
+        + ", ".join(str(c) for c in candidates)
+    )
+
+
 def _import_adapter(domain: str):
     """Lazily import the adapter for a domain."""
     if domain == "tigl":
@@ -76,7 +113,14 @@ def _import_adapter(domain: str):
     elif domain == "pycycle":
         from pycycle_mcp import cpacs_adapter
         return cpacs_adapter
+    elif domain == "nseg":
+        from nseg_mcp import cpacs_adapter
+        return cpacs_adapter
+    elif domain == "aviary":
+        from aviary_cpacs_mcp import cpacs_adapter
+        return cpacs_adapter
     elif domain == "mission":
+        # Legacy path: the old combined mission-mcp (kept for back-compat).
         from mission_mcp import cpacs_adapter
         return cpacs_adapter
     else:
@@ -91,6 +135,11 @@ def run_pipeline(
     output_dir: str | None = None,
     verbose: bool = True,
     extra_artifacts: dict | None = None,
+    su2_preset: str | None = None,
+    su2_surface_density: int | None = None,
+    su2_farfield_factor: float | None = None,
+    su2_converge: bool = False,
+    su2_converge_kwargs: dict | None = None,
 ) -> dict:
     """Run the shared-CPACS pipeline end to end.
 
@@ -115,7 +164,7 @@ def run_pipeline(
         Pipeline summary with per-MCP results and version history.
     """
     if mcps is None:
-        mcps = ["tigl", "su2", "pycycle", "mission"]
+        mcps = ["tigl", "su2", "pycycle", "nseg"]
 
     out = Path(output_dir or "pipeline_output")
     out.mkdir(parents=True, exist_ok=True)
@@ -178,14 +227,86 @@ def run_pipeline(
             summary.pop("step_bytes", None)
 
         elif domain == "su2":
-            updated_xml, summary = adapter.run_adapter(
-                current_xml,
-                flight_conditions=flight_conditions,
-                step_bytes=shared_artifacts.get("step_bytes"),
-                step_path=shared_artifacts.get("step_path"),
-                mesh_path=shared_artifacts.get("mesh_path"),
-                output_dir=str(out / "su2_run"),
-            )
+            su2_mesh_path = shared_artifacts.get("mesh_path")
+            # Custom density / preset / converge mode all need a fresh
+            # mesh, so drop any inherited cached mesh.
+            if su2_preset or su2_surface_density is not None or su2_converge:
+                su2_mesh_path = None
+
+            if su2_converge:
+                # Open-ended refinement: delegate to the deterministic
+                # harness (which loops run_adapter internally) and slot
+                # the final rung's results back into the per-MCP summary
+                # so downstream stages (pyCycle, NSEG, Aviary) see a
+                # converged CL/CD/L/D in CPACS.
+                _converge_run_loop = _load_converge_harness()
+                import argparse as _ap
+
+                step_for_converge = (
+                    shared_artifacts.get("step_path")
+                    or (extra_artifacts or {}).get("step_path")
+                )
+                if not step_for_converge:
+                    raise ValueError(
+                        "--su2-converge requires a STEP file (pass --step "
+                        "or run tigl first)."
+                    )
+
+                converge_defaults = {
+                    "cpacs": cpacs_path,
+                    "step": step_for_converge,
+                    "mesh": None,
+                    "output_root": str(out / "su2_converge"),
+                    "start_density": 30,
+                    "growth": 2.0,
+                    "max_rungs": 5,
+                    "max_wall_seconds": 7200,
+                    "max_n_elem": 5_000_000,
+                    "plateau_tol": 0.01,
+                    "mach": (flight_conditions or {}).get("mach", 0.78),
+                    "aoa": (flight_conditions or {}).get("aoa", 2.0),
+                    "altitude": (flight_conditions or {}).get("altitude_ft", 35000.0),
+                    "iter_cap": 800,
+                    "cl_eps": 1e-4,
+                    "per_rung_timeout": 7200,
+                }
+                converge_defaults.update(su2_converge_kwargs or {})
+                converge_args = _ap.Namespace(**converge_defaults)
+                converge_doc = _converge_run_loop(converge_args)
+
+                final = converge_doc.get("final") or {}
+                # Promote the converged rung into a real run_adapter call
+                # against the produced mesh so the CPACS write-back path
+                # is exercised identically to a preset run.
+                final_mesh = None
+                fd = final.get("output_dir")
+                if fd:
+                    mp = Path(fd) / "aircraft_volume.su2"
+                    if mp.exists():
+                        final_mesh = str(mp)
+                updated_xml, summary = adapter.run_adapter(
+                    current_xml,
+                    flight_conditions=flight_conditions,
+                    mesh_path=final_mesh,
+                    output_dir=str(out / "su2_run"),
+                    preset="industry",
+                    iter_cap=int(converge_defaults["iter_cap"]),
+                    cl_convergence_eps=float(converge_defaults["cl_eps"]),
+                    wall_timeout_seconds=int(converge_defaults["per_rung_timeout"]),
+                )
+                summary["converge_history"] = converge_doc
+            else:
+                updated_xml, summary = adapter.run_adapter(
+                    current_xml,
+                    flight_conditions=flight_conditions,
+                    step_bytes=shared_artifacts.get("step_bytes"),
+                    step_path=shared_artifacts.get("step_path"),
+                    mesh_path=su2_mesh_path,
+                    output_dir=str(out / "su2_run"),
+                    preset=su2_preset,
+                    surface_density=su2_surface_density,
+                    farfield_factor=su2_farfield_factor,
+                )
 
         elif domain == "pycycle":
             updated_xml, summary = adapter.run_adapter(
@@ -193,7 +314,13 @@ def run_pipeline(
                 flight_conditions=flight_conditions,
             )
 
-        elif domain == "mission":
+        elif domain in ("nseg", "mission"):
+            updated_xml, summary = adapter.run_adapter(
+                current_xml,
+                mission_profile=mission_profile,
+            )
+
+        elif domain == "aviary":
             updated_xml, summary = adapter.run_adapter(
                 current_xml,
                 mission_profile=mission_profile,
@@ -298,26 +425,36 @@ def _print_summary(domain: str, summary: dict, elapsed: float) -> None:
                   f"Fn={summary.get('Fn_N', '?')} N, "
                   f"OPR={summary.get('OPR', '?')}, BPR={summary.get('BPR', '?')}")
 
-    elif domain == "mission":
+    elif domain in ("nseg", "mission"):
         if summary.get("success"):
-            backend = summary.get("backend", "nseg")
             fbk = summary.get('total_fuel_burned_kg') or summary.get('fuel_burned_kg', 0)
-            print(f"      Backend: {backend}")
             if fbk:
                 print(f"      Fuel burned: {fbk:.1f} kg")
-            if backend == "aviary":
-                gtow = summary.get('gtow_kg')
-                if gtow:
-                    print(f"      GTOW: {gtow:.1f} kg")
-                conv = summary.get('converged', False)
-                print(f"      Converged: {conv}")
-                rt = summary.get('runtime_seconds')
-                if rt:
-                    print(f"      Runtime: {rt:.1f}s")
-            else:
-                dnm = summary.get('total_distance_nm', 0)
-                thr = summary.get('total_time_hr', 0)
-                print(f"      Range: {dnm:.1f} nm, Time: {thr:.2f} hr")
+            dnm = summary.get('total_distance_nm', 0)
+            thr = summary.get('total_time_hr', 0)
+            ff = summary.get('fuel_fraction', 0)
+            print(f"      Range: {dnm:.1f} nm, Time: {thr:.2f} hr, Fuel fraction: {ff:.3f}")
+
+    elif domain == "aviary":
+        if summary.get("success"):
+            fbk = summary.get('total_fuel_burned_kg') or summary.get('fuel_burned_kg')
+            gtow = summary.get('gtow_kg')
+            wm = summary.get('wing_mass_kg')
+            conv = summary.get('converged', False)
+            rt = summary.get('runtime_seconds')
+            if fbk:
+                print(f"      Fuel burned: {fbk:.1f} kg")
+            if gtow:
+                print(f"      GTOW: {gtow:.1f} kg")
+            if wm:
+                print(f"      Wing mass: {wm:.1f} kg")
+            print(f"      Converged: {conv}")
+            if rt:
+                print(f"      Runtime: {rt:.1f}s")
+        elif summary.get("error"):
+            err = summary["error"]
+            msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+            print(f"      Aviary error: {msg}")
 
 
 def main():
@@ -328,8 +465,10 @@ def main():
     )
     parser.add_argument("cpacs", help="Path to CPACS XML file")
     parser.add_argument("--mcps", nargs="+", default=None,
-                        choices=["tigl", "su2", "pycycle", "mission"],
-                        help="MCPs to run (default: all four in order)")
+                        choices=["tigl", "su2", "pycycle", "nseg", "aviary", "mission"],
+                        help=("MCPs to run (default: tigl su2 pycycle nseg). "
+                              "Pick exactly one mission MCP per run -- 'nseg' (fast) or "
+                              "'aviary' (trajectory-coupled). 'mission' is legacy."))
     parser.add_argument("--mach", type=float, default=None)
     parser.add_argument("--aoa", type=float, default=None)
     parser.add_argument("--altitude", type=float, default=None, help="Altitude in feet")
@@ -338,6 +477,22 @@ def main():
                         help="Cruise range in metres")
     parser.add_argument("--step", default=None, help="Path to existing STEP file for SU2 meshing")
     parser.add_argument("--mesh", default=None, help="Path to existing .su2 mesh file")
+    parser.add_argument("--su2-preset", default=None,
+                        choices=["laptop", "workstation", "industry"],
+                        help=("SU2 mesh/iteration fidelity preset. When set, any existing "
+                              "mesh is ignored and a fresh mesh is generated at that density."))
+    parser.add_argument("--su2-density", type=int, default=None, dest="su2_density",
+                        help=("Open-ended SU2 surface_density override (any positive integer). "
+                              "Overrides the preset's mesh density only; iter/timeout still "
+                              "follow the preset. Forces a fresh mesh."))
+    parser.add_argument("--su2-farfield-factor", type=float, default=None,
+                        dest="su2_farfield_factor",
+                        help="Optional override of the Gmsh farfield-box / span ratio.")
+    parser.add_argument("--su2-converge", action="store_true", dest="su2_converge",
+                        help=("Run the open-ended SU2 mesh-refinement loop "
+                              "(scripts/run_converged_su2.py) before the rest of the pipeline. "
+                              "Returns a converged CL/CD/L/D and records the rung table in the "
+                              "pipeline summary."))
     parser.add_argument("--output-dir", "-o", default=None)
     parser.add_argument("--quiet", "-q", action="store_true")
     args = parser.parse_args()
@@ -379,6 +534,10 @@ def main():
         output_dir=args.output_dir,
         verbose=not args.quiet,
         extra_artifacts=extra_artifacts,
+        su2_preset=args.su2_preset,
+        su2_surface_density=args.su2_density,
+        su2_farfield_factor=args.su2_farfield_factor,
+        su2_converge=args.su2_converge,
     )
 
 
