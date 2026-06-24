@@ -112,6 +112,32 @@ pip install -e "mission-mcp/[aviary]"  # optional
 ./run_pipeline.sh --test-all   # Everything
 ```
 
+## Deterministic skill harnesses (`scripts/`)
+
+The agent's *iterative skills* — judgment loops that call a tool repeatedly
+until a numerical condition is met — each ship a no-LLM Python harness so they
+can be reproduced (and unit-tested) without an agent. They wrap the **real**
+SU2 / pyCycle / NSEG adapters; a missing solver is a loud, structured error,
+never a fabricated result.
+
+| Harness | What it converges | Disciplines |
+|---------|-------------------|-------------|
+| [`scripts/run_converged_su2.py`](scripts/run_converged_su2.py) | mesh density until CL/CD plateau | SU2 |
+| [`scripts/run_aoa_sweep.py`](scripts/run_aoa_sweep.py) | best-L/D + trim angle for a target CL | SU2 |
+| [`scripts/run_engine_resize.py`](scripts/run_engine_resize.py) | smallest engine that closes the mission at top of climb | pyCycle ↔ NSEG |
+| [`scripts/run_cruise_match.py`](scripts/run_cruise_match.py) | cruise point where thrust = drag, with weight/fuel closure | SU2 ↔ pyCycle ↔ NSEG |
+
+```bash
+# Example: size the engine so a 3000 km mission closes with a 5% climb margin
+python scripts/run_engine_resize.py --cpacs examples/D150_v30.xml \
+  --mach 0.78 --altitude 35000 --weight 70000 --range-km 3000 \
+  --target-margin-frac 0.05
+```
+
+Unit tests for the loop logic live in `scripts/tests/` and run on monkeypatched
+adapters (`pytest scripts/tests`). The agent-side specs are in
+[`cmudrc/agent-mcp`](https://github.com/cmudrc/agent-mcp) under `skills/`.
+
 ## MCP Repositories
 
 | MCP | GitHub | Version | Description |
@@ -135,6 +161,11 @@ aircraft-analysis/
 │   └── validator.py
 ├── pipeline/              ← Orchestrator
 │   └── shared_cpacs_orchestrator.py
+├── scripts/               ← Deterministic skill harnesses (+ tests/)
+│   ├── run_converged_su2.py
+│   ├── run_aoa_sweep.py
+│   ├── run_engine_resize.py
+│   └── run_cruise_match.py
 ├── examples/              ← Sample CPACS files
 │   ├── D150_v30.xml
 │   ├── canards.xml
