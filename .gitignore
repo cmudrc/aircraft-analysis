@@ -1,0 +1,27 @@
+__pycache__/
+*.py[codz]
+*.so
+build/
+dist/
+*.egg-info/
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+env/
+venv/
+pipeline_output/
+*.log
+
+# macOS Finder metadata
+.DS_Store
+**/.DS_Store
+
+# Restricted dataset: DLR-F25 is provided by DLR under terms that forbid
+# redistribution. Never commit these files to any repository.
+DLR-F25*
+DLR_F25*
+dlr_f25*
+dlrf25*
+*F25*.xml
