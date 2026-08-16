@@ -103,12 +103,10 @@ pip install -e "mission-mcp/[aviary]"  # optional
 ./run_pipeline.sh canards
 ```
 
-### Run Tests & OVS
+### Run Tests
 
 ```bash
-./run_pipeline.sh --test       # Pipeline integration tests
-./run_pipeline.sh --ovs        # OVS validation suite
-./run_pipeline.sh --test-all   # Everything
+./run_pipeline.sh --test       # Skill-harness tests
 ```
 
 ## Deterministic skill harnesses (`scripts/`)
@@ -156,8 +154,6 @@ aircraft-analysis/
 │   ├── __init__.py
 │   ├── manager.py
 │   └── xpath_registry.py
-├── ovs/                   ← Output Verification System
-│   └── validator.py
 ├── pipeline/              ← Orchestrator
 │   └── shared_cpacs_orchestrator.py
 ├── scripts/               ← Deterministic skill harnesses (+ tests/)
@@ -173,17 +169,20 @@ aircraft-analysis/
     └── parameters.md
 ```
 
-## Output Verification System (OVS)
+## Change-control gate (CI)
 
-The OVS validates that each MCP's output meets structural and plausibility
-requirements:
+Every repository runs a GitHub Actions gate on each push to `main` and each
+pull request, across Ubuntu, Windows, and macOS on Python 3.12 and 3.13. It
+checks that the code is clean and that its declared dependencies resolve:
+the package installs from its own manifest, `ruff` lints it, `mypy` type-checks
+it in strict mode, and FastMCP smoke-imports confirm the tool surface builds.
+Solver-integration tests are gated to Ubuntu, since they need native Linux
+toolchains.
 
-- **Structural checks**: Required XPaths exist and are properly nested
-- **Range checks**: Numerical values fall within physically plausible bounds
-  (e.g., CL ∈ [-2, 3], TSFC ∈ [0, 5])
-- **Cross-MCP checks**: Later MCPs can verify their inputs from earlier MCPs
-
-OVS runs as a CI check (`.github/workflows/ovs.yml`) on every MCP repository.
+This fires on code changes only, never during a pipeline run or an agent
+session. Reproducing a *result* is a separate thing, and is what the
+deterministic harnesses in `scripts/` are for: they re-derive any reported
+number without running an AI.
 
 ## Example Results (D150)
 

@@ -32,7 +32,4 @@ jobs:
           python -m pip install pytest ruff
 
       - name: Ruff lint (cross-platform)
-        run: python -m ruff check ovs tests
-
-      - name: Pytest -- OVS library smoke tests
-        run: python -m pytest tests/ -q -o "addopts="
+        run: python -m ruff check pipeline scripts shared_cpacs

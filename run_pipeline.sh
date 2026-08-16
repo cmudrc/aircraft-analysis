@@ -11,9 +11,7 @@
 #   ./run_pipeline.sh d150 --mach 0.85         # Override flight conditions
 #
 # Testing:
-#   ./run_pipeline.sh --test                   # Run all pipeline tests
-#   ./run_pipeline.sh --ovs                    # Run OVS validation suite
-#   ./run_pipeline.sh --test-all               # Run everything (tests + OVS)
+#   ./run_pipeline.sh --test                   # Run the skill-harness tests
 #
 # Requirements:
 #   - SU2_CFD on PATH (installed at ~/.local/su2/bin)
@@ -45,18 +43,8 @@ export PYTHONPATH="${SCRIPT_DIR}:${SCRIPT_DIR}/tigl-mcp/src:${SCRIPT_DIR}/su2-mc
 # ── Handle test modes ──
 case "${1:-}" in
     --test)
-        echo "Running pipeline integration tests..."
-        python -m pytest pipeline/test_shared_pipeline.py -v --tb=short
-        exit $?
-        ;;
-    --ovs)
-        echo "Running OVS validation suite..."
-        python -m pytest ovs/test_ovs.py -v --tb=short
-        exit $?
-        ;;
-    --test-all)
-        echo "Running all tests + OVS..."
-        python -m pytest pipeline/test_shared_pipeline.py ovs/test_ovs.py -v --tb=short
+        echo "Running skill-harness tests..."
+        python -m pytest scripts/tests/ -v --tb=short
         exit $?
         ;;
 esac

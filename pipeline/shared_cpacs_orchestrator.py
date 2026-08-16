@@ -24,6 +24,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 # Ensure project roots are importable
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -41,7 +42,7 @@ for sub in (
     if p.is_dir() and str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from shared_cpacs.manager import CPACSManager
+from shared_cpacs.manager import CPACSManager  # noqa: E402
 
 
 def _find_existing_artifacts(cpacs_path: str) -> dict[str, str | None]:
@@ -180,7 +181,7 @@ def run_pipeline(
     if verbose:
         ref = manager.extract_reference_data()
         print(f"\n{'='*60}")
-        print(f"  Shared-CPACS Pipeline (Real Solvers)")
+        print("  Shared-CPACS Pipeline (Real Solvers)")
         print(f"{'='*60}")
         print(f"  Source:     {cpacs_path}")
         print(f"  Aircraft:   {ref.get('name', 'N/A')}")
@@ -367,7 +368,7 @@ def run_pipeline(
 
     if verbose:
         print(f"\n{'='*60}")
-        print(f"  Pipeline Complete")
+        print("  Pipeline Complete")
         print(f"{'='*60}")
         print(f"  Versions created: {len(manager.version_history())}")
         print(f"  Total time:       {total_elapsed:.1f}s")

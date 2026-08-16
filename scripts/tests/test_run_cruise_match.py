@@ -10,7 +10,6 @@ still calls the real SU2/pyCycle/NSEG; here we test the fixed-point loop.
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
 from xml.etree import ElementTree as ET
