@@ -38,7 +38,7 @@ CPACS XML. This gives a full audit trail:
 | v1 | `tigl-mcp` | + geometry analysis results (wing/fuselage counts, bounding boxes) |
 | v2 | `su2-mcp` | + aerodynamic coefficients (CL, CD, L/D) |
 | v3 | `pycycle-mcp` | + engine performance (TSFC, thrust, OPR, BPR) |
-| v4 | `mission-mcp` | + mission results (fuel burn, GTOW, trajectory) |
+| v4 | `nseg-mcp` or `aviary-cpacs-mcp` | + mission results (fuel burn, GTOW, trajectory) |
 
 All version snapshots are saved as `cpacs_v0.xml`, `cpacs_v1.xml`, etc., so
 you can compare or restore any previous state.
@@ -83,8 +83,8 @@ No two MCPs write to the same XPath, preventing conflicts.
 pip install -e tigl-mcp/
 pip install -e su2-mcp/
 pip install -e pycycle-mcp/
-pip install -e mission-mcp/
-pip install -e "mission-mcp/[aviary]"  # optional
+pip install -e nseg-mcp/
+pip install -e aviary-cpacs-mcp/   # optional, trajectory-level missions
 ```
 
 ### Run the Pipeline
@@ -142,7 +142,8 @@ adapters (`pytest scripts/tests`). The agent-side specs are in
 | TiGL | [cmudrc/tigl-mcp](https://github.com/cmudrc/tigl-mcp) | 0.3.0 | CPACS geometry parsing, STEP export |
 | SU2 | [cmudrc/su2-mcp](https://github.com/cmudrc/su2-mcp) | 0.3.0 | CFD aerodynamic analysis (Euler) |
 | pyCycle | [cmudrc/pycycle-mcp](https://github.com/cmudrc/pycycle-mcp) | 0.3.0 | Turbofan engine cycle analysis |
-| Mission | [cmudrc/mission-mcp](https://github.com/cmudrc/mission-mcp) | 0.2.0 | Mission analysis (Aviary + NSEG) |
+| Mission (segment/Breguet) | [cmudrc/nseg-mcp](https://github.com/cmudrc/nseg-mcp) | Mission analysis, low fidelity |
+| Mission (trajectory) | [cmudrc/aviary-cpacs-mcp](https://github.com/cmudrc/aviary-cpacs-mcp) | Mission analysis via NASA Aviary |
 
 ## Directory Structure
 
@@ -188,11 +189,31 @@ number without running an AI.
 
 | Domain | Key Results |
 |--------|-------------|
-| **TiGL** | 5 wings, 2 fuselages, STEP exported |
-| **SU2** | CL=0.074, CD=0.021, L/D=3.48, Euler solver |
+| **TiGL** | 3 wings, 1 fuselage, STEP exported (3.2 MB, real TiGL) |
+| **SU2** | CL=0.074, CD=0.021, L/D=3.48, Euler — *demo point, not cruise* |
 | **pyCycle** | TSFC=0.885, Fn=26528 N, OPR=30.6, BPR=1.5 |
 | **Mission (Aviary)** | Fuel=5812 kg, GTOW=62732 kg, Converged |
+
+**Read the SU2 row carefully.** `L/D = 3.48` is not a cruise value and should
+not be compared with one. It is a coarse-mesh, low-angle-of-attack smoke test
+whose purpose is to show the pipeline runs end to end. Two things make it low:
+the angle of attack is well below the cruise trim point, so lift is small, and
+the mesh is the ~50k-cell preset. On a converged ~2M-cell mesh at
+alpha = 2.5 deg the same aircraft gives CL = 0.348 and L/D = 16.4. Euler still
+sits below the RANS band of roughly 20-27 for this class, because inviscid flow
+has no skin friction.
+
+The counts come from a parser scoped to the aircraft model subtree. An earlier
+version searched the whole document and reported 5 wings and 2 fuselages for
+the D150, having also matched vendor blocks under `toolspecific/`. If you see
+those numbers in older output, that is why.
 
 ## License
 
 [MIT](LICENSE)
+
+## Maintainers
+
+Mayank Dixit ([@Kugel-Blitz-13](https://github.com/Kugel-Blitz-13)), Carnegie
+Mellon University — mayankd@cmu.edu
+Christopher McComb, Carnegie Mellon University — Design Research Collective
