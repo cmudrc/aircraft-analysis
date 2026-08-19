@@ -1,6 +1,6 @@
 # Aircraft Analysis Pipeline
 
-A shared-CPACS aircraft analysis pipeline built on four independent
+A shared-CPACS aircraft analysis pipeline built on five independent
 **Model Context Protocol (MCP)** servers. A single CPACS XML file serves as
 the central data backbone; each MCP reads its inputs from and writes its
 results back into that file, enabling flexible, version-tracked multidisciplinary
@@ -90,7 +90,7 @@ pip install -e aviary-cpacs-mcp/   # optional, trajectory-level missions
 ### Run the Pipeline
 
 ```bash
-# All four MCPs on D150
+# All five MCPs on D150
 ./run_pipeline.sh d150
 
 # Specific MCPs only
