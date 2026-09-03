@@ -111,8 +111,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Cruise altitude in feet (default 35000).")
 
     # Mission inputs.
-    p.add_argument("--weight", type=float, default=78000.0,
-                   help="Takeoff gross weight [kg] (default 78000).")
+    p.add_argument("--weight", type=float, default=None, required=True,
+                   help="Takeoff gross weight [kg]. Required -- it used to "
+                        "default to 78000, which quietly sized every aircraft "
+                        "as a 78-tonne one.")
     p.add_argument("--range-km", type=float, default=3000.0,
                    help="Cruise range [km] (default 3000).")
 

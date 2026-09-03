@@ -221,11 +221,21 @@ def _set_aero_coeffs(xml: str, cd0: float, cl: float, cd: float) -> str:
 
 
 def _ref_area(xml: str) -> float:
+    """Reference area from CPACS. No fallback on purpose.
+
+    This used to return 122.4, the D150's wing area, so any file without a
+    reference block was sized as if it were a D150 and the run still looked
+    entirely normal.
+    """
     root = ET.fromstring(xml)
     el = root.find(".//vehicles/aircraft/model/reference/area")
     if el is not None and el.text:
         return float(el.text)
-    return 122.4
+    raise ValueError(
+        "CPACS states no reference area at "
+        "//vehicles/aircraft/model/reference/area. Cruise CL is lift divided "
+        "by (dynamic pressure x area), so there is no answer without it."
+    )
 
 
 def _build_polar(args: argparse.Namespace, xml: str, out_root: Path) -> dict[str, Any]:

@@ -135,6 +135,7 @@ def test_resize_converges_to_zero_margin(tmp_path, monkeypatch):
 
     args = h.parse_args([
         "--cpacs", str(cpacs),
+        "--weight", "78000",
         "--output-root", str(tmp_path / "out"),
         "--target-margin-frac", "0.0",
         "--tol-n", "100",
@@ -158,6 +159,7 @@ def test_resize_hits_positive_margin_fraction(tmp_path, monkeypatch):
 
     args = h.parse_args([
         "--cpacs", str(cpacs),
+        "--weight", "78000",
         "--output-root", str(tmp_path / "out"),
         "--target-margin-frac", "0.05",
         "--tol-n", "100",
@@ -177,6 +179,7 @@ def test_pycycle_error_aborts_without_fake_convergence(tmp_path, monkeypatch):
     )
     args = h.parse_args([
         "--cpacs", str(cpacs),
+        "--weight", "78000",
         "--output-root", str(tmp_path / "out"),
     ])
     doc = h.run_loop(args)
@@ -191,6 +194,7 @@ def test_no_thrust_closure_is_error(tmp_path, monkeypatch):
     _install_fakes(monkeypatch, t_req_n=80000.0, drop_thrust_closure=True)
     args = h.parse_args([
         "--cpacs", str(cpacs),
+        "--weight", "78000",
         "--output-root", str(tmp_path / "out"),
     ])
     doc = h.run_loop(args)
@@ -205,6 +209,7 @@ def test_thrust_bound_reached_does_not_claim_convergence(tmp_path, monkeypatch):
     _install_fakes(monkeypatch, t_req_n=5.0e6)
     args = h.parse_args([
         "--cpacs", str(cpacs),
+        "--weight", "78000",
         "--output-root", str(tmp_path / "out"),
         "--max-thrust-lbf", "60000",
         "--max-iters", "8",
@@ -219,6 +224,7 @@ def test_missing_cpacs_rejected(tmp_path):
     h = _load_harness()
     args = h.parse_args([
         "--cpacs", str(tmp_path / "nope.xml"),
+        "--weight", "78000",
         "--output-root", str(tmp_path / "out"),
     ])
     with pytest.raises(FileNotFoundError):

@@ -363,13 +363,25 @@ def run_pipeline(
         "summaries": _sanitize_for_json(summaries),
     }
 
+    # A stage that refused to run is a failed pipeline, not a complete one.
+    # Reporting "Pipeline Complete" and exiting 0 after a stage errored is how
+    # a refusal gets mistaken for a result by anything reading the exit code.
+    failed = [
+        name for name, summary in summaries.items()
+        if isinstance(summary, dict) and summary.get("error") is not None
+    ]
+    pipeline_result["failed_stages"] = failed
+    pipeline_result["success"] = not failed
+
     with open(results_path, "w") as f:
         json.dump(pipeline_result, f, indent=2, default=str)
 
     if verbose:
         print(f"\n{'='*60}")
-        print("  Pipeline Complete")
+        print("  Pipeline Complete" if not failed else "  Pipeline FAILED")
         print(f"{'='*60}")
+        if failed:
+            print(f"  Failed stages:    {', '.join(failed)}")
         print(f"  Versions created: {len(manager.version_history())}")
         print(f"  Total time:       {total_elapsed:.1f}s")
         print(f"  Final CPACS:      {final_cpacs_path}")
@@ -526,7 +538,7 @@ def main():
     if args.mesh:
         extra_artifacts["mesh_path"] = args.mesh
 
-    run_pipeline(
+    result = run_pipeline(
         cpacs_path=args.cpacs,
         mcps=args.mcps,
         flight_conditions=fc,
@@ -539,7 +551,10 @@ def main():
         su2_farfield_factor=args.su2_farfield_factor,
         su2_converge=args.su2_converge,
     )
+    # Non-zero exit when any stage refused, so a caller reading the exit code
+    # cannot mistake a refusal for a result.
+    return 0 if result.get("success", True) else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
