@@ -10,6 +10,7 @@ still calls the real SU2/pyCycle/NSEG; here we test the fixed-point loop.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -244,4 +245,75 @@ def test_missing_cpacs_rejected(tmp_path):
         "--cd0", "0.02", "--k", "0.04", "--weight", "70000",
     ])
     with pytest.raises(FileNotFoundError):
+        h.run_loop(args)
+
+
+# --------------------------------------------------------------------------
+# Fuel-available mode (added 2026-09-10): fix fuel on board, solve for range
+# --------------------------------------------------------------------------
+def _install_nseg_range_dependent(monkeypatch, *, fixed_frac=0.02, per_km_frac=1.0e-5):
+    """Fake NSEG whose block fuel grows linearly with range, so bisection has an
+    analytic answer: fuel = W * (fixed_frac + per_km_frac * range_km)."""
+    import nseg_mcp.cpacs_adapter as real_nseg
+
+    def fake_run_adapter(xml, mission_profile=None):
+        mp = mission_profile or {}
+        w = float(mp.get("weight_kg", 0.0))
+        rng_km = float(mp.get("range_m", 0.0)) / 1000.0
+        return xml, {"success": True, "total_fuel_burned_kg": w * (fixed_frac + per_km_frac * rng_km)}
+
+    monkeypatch.setattr(real_nseg, "run_adapter", fake_run_adapter)
+
+
+def test_fuel_available_mode_solves_for_range(tmp_path, monkeypatch):
+    h = _load_harness()
+    xml_path = _write_cpacs(tmp_path)
+    _install_pyc(monkeypatch)
+    _install_nseg_range_dependent(monkeypatch, fixed_frac=0.02, per_km_frac=1.0e-5)
+
+    oew, payload, fuel, reserve = 42000.0, 18000.0, 8000.0, 0.05
+    w_to = oew + payload + fuel
+    target_block = fuel / (1.0 + reserve)
+    expected_km = (target_block / w_to - 0.02) / 1.0e-5
+
+    args = h.parse_args([
+        "--cpacs", str(xml_path), "--cd0", "0.0164", "--k", "0.0398",
+        "--oew", str(oew), "--payload", str(payload), "--fuel-available", str(fuel),
+        "--reserve-frac", str(reserve), "--tol", "1e-4", "--out", str(tmp_path / "out"),
+    ])
+    doc = h.run_loop(args)
+
+    assert doc["status"] == "converged"
+    assert doc["mode"] == "fuel_available"
+    got = doc["converged"]["range_km"]
+    assert got == pytest.approx(expected_km, rel=2e-3)
+    assert doc["converged"]["W_TO_kg"] == pytest.approx(w_to)
+    assert doc["config"]["solved_range_km"] == got
+    # every evaluation ran the (fake) solvers at the fixed take-off weight
+    assert all(it["W_TO_kg"] == pytest.approx(w_to) for it in doc["iterations"])
+
+
+def test_fuel_available_mode_reports_infeasible_when_fuel_cannot_cover_minimum(tmp_path, monkeypatch):
+    h = _load_harness()
+    xml_path = _write_cpacs(tmp_path)
+    _install_pyc(monkeypatch)
+    # 20% of weight burned even at zero range: 500 kg cannot cover a 50 km mission.
+    _install_nseg_range_dependent(monkeypatch, fixed_frac=0.20, per_km_frac=0.0)
+    args = h.parse_args([
+        "--cpacs", str(xml_path), "--cd0", "0.0164", "--k", "0.0398",
+        "--oew", "42000", "--payload", "18000", "--fuel-available", "500",
+        "--out", str(tmp_path / "out"),
+    ])
+    doc = h.run_loop(args)
+    assert doc["status"] == "infeasible"
+    assert doc["stop_reason"] == "fuel_insufficient_for_minimum_range"
+    assert doc["converged"] is None
+
+
+def test_fuel_available_mode_requires_oew_and_payload(tmp_path):
+    h = _load_harness()
+    xml_path = _write_cpacs(tmp_path)
+    args = h.parse_args(["--cpacs", str(xml_path), "--cd0", "0.0164", "--k", "0.0398",
+                         "--fuel-available", "8000", "--out", str(tmp_path / "out")])
+    with pytest.raises(ValueError, match="--fuel-available needs --oew and --payload"):
         h.run_loop(args)

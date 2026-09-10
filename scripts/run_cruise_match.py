@@ -38,6 +38,14 @@ fabricated polar or fuel figure (no-stubs rule). The drag polar may instead be
 supplied explicitly with ``--cd0``/``--k`` (a user input, not a stub); SU2 is
 run by default.
 
+Fuel-available mode (Boeing's second formulation, 2026-09-10): fix the fuel on
+board instead of the range, hold take-off weight at OEW + payload + fuel, and
+solve by bisection for the range that burns exactly that fuel less the reserve.
+Every bisection step runs the real pyCycle and NSEG solvers::
+
+    python scripts/run_cruise_match.py --cpacs D150_v30.xml --cd0 0.0164 --k 0.0398 \\
+        --oew 42000 --payload 18000 --fuel-available 11000
+
 Example (sizing mode)::
 
     python scripts/run_cruise_match.py \\
@@ -134,6 +142,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--payload", type=float, default=None, help="Payload [kg].")
     p.add_argument("--weight", type=float, default=None,
                    help="Fixed takeoff weight [kg] (match mode; alternative to --oew/--payload).")
+    p.add_argument("--fuel-available", type=float, default=None,
+                   help="Fuel on board [kg]. With --oew and --payload this fixes the takeoff "
+                        "weight and solves for the range that burns exactly this fuel "
+                        "(fuel-available mode). --range-km is then only the first upper guess.")
     p.add_argument("--range-km", type=float, default=3000.0)
     p.add_argument("--reserve-frac", type=float, default=0.05,
                    help="Reserve fuel as a fraction of block fuel (default 0.05).")
@@ -302,9 +314,16 @@ def run_loop(args: argparse.Namespace) -> dict[str, Any]:
     if not (0.0 < args.relax <= 1.0):
         raise ValueError("--relax must be in (0, 1].")
 
-    sizing = args.oew is not None and args.payload is not None
-    if not sizing and args.weight is None:
-        raise ValueError("Provide --oew and --payload (sizing) OR --weight (match mode).")
+    fuel_mode = args.fuel_available is not None
+    sizing = (not fuel_mode) and args.oew is not None and args.payload is not None
+    if fuel_mode and (args.oew is None or args.payload is None):
+        raise ValueError("--fuel-available needs --oew and --payload.")
+    if fuel_mode and args.fuel_available <= 0:
+        raise ValueError("--fuel-available must be positive.")
+    if not fuel_mode and not sizing and args.weight is None:
+        raise ValueError("Provide --oew and --payload (sizing), --weight (match mode), "
+                         "or --fuel-available with --oew and --payload (fuel-available mode).")
+    mode = "fuel_available" if fuel_mode else ("sizing" if sizing else "match")
 
     out_root = Path(args.output_root).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
@@ -326,106 +345,167 @@ def run_loop(args: argparse.Namespace) -> dict[str, Any]:
 
     print(
         f"[cruise-match] polar cd0={cd0:.5f} k={k:.5f} ({polar['source']}); "
-        f"q={q:.1f}Pa S={S}m^2; mode={'sizing' if sizing else 'match'}",
+        f"q={q:.1f}Pa S={S}m^2; mode={mode}",
         flush=True,
     )
 
-    if sizing:
+    if sizing or fuel_mode:
         oew, payload = float(args.oew), float(args.payload)
-        fuel_guess = args.fuel_guess_frac * (oew + payload)
-        w_to = oew + payload + fuel_guess
     else:
         oew = payload = None
-        w_to = float(args.weight)
 
     iterations: list[dict[str, Any]] = []
     status = "did_not_converge"
     stop_reason = "max_iters"
     final_xml = base_xml
     converged_record: dict[str, Any] | None = None
-    ff = 0.0
 
-    for it in range(1, args.max_iters + 1):
-        # Mid-cruise weight (Breguet uses the average over the burn).
-        w_cruise = w_to * (1.0 - 0.5 * ff)
+    class _Abort(Exception):
+        def __init__(self, payload: dict[str, Any]) -> None:
+            super().__init__(payload.get("message", "abort"))
+            self.payload = payload
+
+    def evaluate(w_to_kg: float, range_m: float, ff: float) -> dict[str, Any]:
+        """One pass: cruise state -> pyCycle sized to drag -> NSEG block fuel.
+
+        Real solvers at every call. Returns the record for this pass plus the
+        mission CPACS; raises _Abort with a structured error if a stage refuses.
+        """
+        w_cruise = w_to_kg * (1.0 - 0.5 * ff)
         cs = cruise_state(w_cruise, q, S, cd0, k)
         drag_n = cs["drag_n"]
-
-        # pyCycle sized so cruise thrust = drag.
         try:
             eng_xml, eng = pyc.run_adapter(
                 base_xml, flight_conditions={"mach": args.mach, "altitude_ft": args.altitude},
                 design_thrust_lbf=drag_n * N_TO_LBF,
             )
         except Exception as exc:  # noqa: BLE001
-            return _abort(out_root, iterations, args,
-                          {"stage": "pycycle", "type": "adapter_exception", "message": str(exc)})
+            raise _Abort({"stage": "pycycle", "type": "adapter_exception", "message": str(exc)}) from exc
         if eng.get("error"):
-            return _abort(out_root, iterations, args, {"stage": "pycycle", **_as_error(eng["error"])})
-
+            raise _Abort({"stage": "pycycle", **_as_error(eng["error"])})
         fn_n = float(eng.get("Fn_N") or 0.0)
-        tsfc = eng.get("TSFC_1_per_s")
-        thrust_drag_residual = fn_n - drag_n
-
-        # Encode the polar at this cruise CL and run NSEG for block fuel.
         aero_xml = _set_aero_coeffs(eng_xml, cd0, cs["CL"], cs["CD"])
         try:
-            mis_xml, mission = nseg.run_adapter(aero_xml, mission_profile={**fixed, "weight_kg": w_to})
+            mis_xml, mission = nseg.run_adapter(
+                aero_xml, mission_profile={**fixed, "range_m": range_m, "weight_kg": w_to_kg})
         except Exception as exc:  # noqa: BLE001
-            return _abort(out_root, iterations, args,
-                          {"stage": "nseg", "type": "adapter_exception", "message": str(exc)})
+            raise _Abort({"stage": "nseg", "type": "adapter_exception", "message": str(exc)}) from exc
         if mission.get("error") or not mission.get("success"):
             err = mission.get("error") or {"type": "mission_failed", "message": "NSEG did not succeed"}
-            return _abort(out_root, iterations, args, {"stage": "nseg", **_as_error(err)})
-
+            raise _Abort({"stage": "nseg", **_as_error(err)})
         block_fuel = float(mission.get("total_fuel_burned_kg", 0.0))
-        total_fuel = block_fuel * (1.0 + args.reserve_frac)
-
-        if sizing:
-            w_to_new = oew + payload + total_fuel
-        else:
-            w_to_new = w_to  # fixed-weight match: weight does not move
-        rel = abs(w_to_new - w_to) / max(w_to, 1.0)
-
-        rec = {
-            "iter": it,
-            "W_TO_kg": round(w_to, 2),
+        return {
+            "W_TO_kg": round(w_to_kg, 2),
             "W_cruise_kg": round(w_cruise, 2),
             "CL": round(cs["CL"], 5),
             "CD": round(cs["CD"], 6),
             "L_over_D": round(cs["L_over_D"], 3),
             "drag_n": round(drag_n, 2),
             "Fn_N": round(fn_n, 2),
-            "thrust_drag_residual_n": round(thrust_drag_residual, 2),
-            "TSFC_1_per_s": tsfc,
+            "thrust_drag_residual_n": round(fn_n - drag_n, 2),
+            "TSFC_1_per_s": eng.get("TSFC_1_per_s"),
             "block_fuel_kg": round(block_fuel, 2),
-            "total_fuel_kg": round(total_fuel, 2),
-            "W_TO_new_kg": round(w_to_new, 2),
-            "rel_dW": round(rel, 6),
-            "elapsed_s": round(time.time() - wall_start, 2),
+            "total_fuel_kg": round(block_fuel * (1.0 + args.reserve_frac), 2),
+            "range_km": round(range_m / 1000.0, 2),
+            "_xml": mis_xml,
         }
-        iterations.append(rec)
-        print(
-            f"  it={it:>2} W_TO={w_to:>9.1f}kg CL={cs['CL']:.4f} L/D={cs['L_over_D']:.2f} "
-            f"D={drag_n:>9.1f}N Fn={fn_n:>9.1f}N (res {thrust_drag_residual:>+.1f}N) "
-            f"fuel={block_fuel:>8.1f}kg -> W_TO'={w_to_new:>9.1f}kg (dW {rel:.2e})",
-            flush=True,
-        )
-        final_xml = mis_xml
 
-        if rel <= args.tol:
-            status = "converged"
-            stop_reason = "weight_within_tolerance"
-            converged_record = rec
-            break
+    try:
+        if fuel_mode:
+            # ── Fuel-available mode: take-off weight is fixed; solve for range. ──
+            # Block fuel rises monotonically with range (the cruise leg is Breguet),
+            # so the range that burns exactly the fuel on board is found by
+            # bisection. The fuel that may be burned is the fuel on board less the
+            # reserve fraction, which is held back rather than flown.
+            fuel_avail = float(args.fuel_available)
+            w_to = oew + payload + fuel_avail
+            target_block = fuel_avail / (1.0 + args.reserve_frac)
+            ff = fuel_avail / w_to
+            print(f"[cruise-match] fuel available {fuel_avail:.1f} kg, W_TO fixed at {w_to:.1f} kg, "
+                  f"target block fuel {target_block:.1f} kg (reserve {args.reserve_frac:.0%} held back)",
+                  flush=True)
 
-        w_to = args.relax * w_to_new + (1.0 - args.relax) * w_to
-        ff = block_fuel / max(w_to, 1.0)
+            lo_km, hi_km = 50.0, float(args.range_km)
+            it = 0
 
-        if time.time() - wall_start >= args.max_wall_seconds:
-            stop_reason = "max_wall_seconds"
-            print("  wall-clock budget exhausted; stopping.", flush=True)
-            break
+            def _eval_at(range_km: float) -> dict[str, Any]:
+                nonlocal it, final_xml
+                it += 1
+                rec = evaluate(w_to, range_km * 1000.0, ff)
+                final_xml = rec.pop("_xml")
+                rec.update({"iter": it, "target_block_fuel_kg": round(target_block, 2),
+                            "bracket_km": [round(lo_km, 1), round(hi_km, 1)],
+                            "elapsed_s": round(time.time() - wall_start, 2)})
+                iterations.append(rec)
+                print(f"  it={it:>2} range={range_km:>8.1f}km fuel={rec['block_fuel_kg']:>8.1f}kg "
+                      f"(target {target_block:>8.1f}) L/D={rec['L_over_D']:.2f} "
+                      f"bracket [{lo_km:.0f}, {hi_km:.0f}]", flush=True)
+                return rec
+
+            f_lo = _eval_at(lo_km)["block_fuel_kg"]
+            if f_lo > target_block:
+                status, stop_reason = "infeasible", "fuel_insufficient_for_minimum_range"
+                print(f"  {fuel_avail:.0f} kg does not cover even a {lo_km:.0f} km mission "
+                      f"(needs {f_lo:.0f} kg).", flush=True)
+            else:
+                f_hi = _eval_at(hi_km)["block_fuel_kg"]
+                while f_hi < target_block and hi_km < 25_000.0 and it < args.max_iters:
+                    lo_km, f_lo = hi_km, f_hi
+                    hi_km = min(hi_km * 2.0, 25_000.0)
+                    f_hi = _eval_at(hi_km)["block_fuel_kg"]
+                if f_hi < target_block:
+                    status, stop_reason = "did_not_converge", "range_bracket_exceeded_25000km"
+                else:
+                    while it < args.max_iters:
+                        mid = 0.5 * (lo_km + hi_km)
+                        rec = _eval_at(mid)
+                        f_mid = rec["block_fuel_kg"]
+                        if abs(f_mid - target_block) / max(target_block, 1.0) <= args.tol or (hi_km - lo_km) < 1.0:
+                            status, stop_reason = "converged", "fuel_within_tolerance"
+                            converged_record = rec
+                            break
+                        if f_mid < target_block:
+                            lo_km, f_lo = mid, f_mid
+                        else:
+                            hi_km, f_hi = mid, f_mid
+                        if time.time() - wall_start >= args.max_wall_seconds:
+                            stop_reason = "max_wall_seconds"
+                            break
+        else:
+            # ── Sizing / match mode: range is fixed; iterate weight to a fixed point. ──
+            if sizing:
+                fuel_guess = args.fuel_guess_frac * (oew + payload)
+                w_to = oew + payload + fuel_guess
+            else:
+                w_to = float(args.weight)
+            ff = 0.0
+            for it in range(1, args.max_iters + 1):
+                rec = evaluate(w_to, fixed["range_m"], ff)
+                final_xml = rec.pop("_xml")
+                block_fuel, total_fuel = rec["block_fuel_kg"], rec["total_fuel_kg"]
+                w_to_new = (oew + payload + total_fuel) if sizing else w_to
+                rel = abs(w_to_new - w_to) / max(w_to, 1.0)
+                rec.update({"iter": it, "W_TO_new_kg": round(w_to_new, 2), "rel_dW": round(rel, 6),
+                            "elapsed_s": round(time.time() - wall_start, 2)})
+                iterations.append(rec)
+                print(
+                    f"  it={it:>2} W_TO={w_to:>9.1f}kg CL={rec['CL']:.4f} L/D={rec['L_over_D']:.2f} "
+                    f"D={rec['drag_n']:>9.1f}N Fn={rec['Fn_N']:>9.1f}N (res {rec['thrust_drag_residual_n']:>+.1f}N) "
+                    f"fuel={block_fuel:>8.1f}kg -> W_TO'={w_to_new:>9.1f}kg (dW {rel:.2e})",
+                    flush=True,
+                )
+                if rel <= args.tol:
+                    status, stop_reason = "converged", "weight_within_tolerance"
+                    converged_record = rec
+                    break
+                w_to = args.relax * w_to_new + (1.0 - args.relax) * w_to
+                ff = block_fuel / max(w_to, 1.0)
+                if time.time() - wall_start >= args.max_wall_seconds:
+                    stop_reason = "max_wall_seconds"
+                    print("  wall-clock budget exhausted; stopping.", flush=True)
+                    break
+    except _Abort as ab:
+        return _abort(out_root, iterations, args, ab.payload)
 
     out_xml_path = out_root / "cruise_match_final.xml"
     out_xml_path.write_text(final_xml, encoding="utf-8")
@@ -433,7 +513,7 @@ def run_loop(args: argparse.Namespace) -> dict[str, Any]:
     history_doc = {
         "status": status,
         "stop_reason": stop_reason,
-        "mode": "sizing" if sizing else "match",
+        "mode": mode,
         "polar": {"cd0": round(cd0, 6), "k": round(k, 6), "source": polar["source"],
                   "points": polar["points"]},
         "converged": converged_record,
@@ -448,7 +528,9 @@ def run_loop(args: argparse.Namespace) -> dict[str, Any]:
             "oew_kg": args.oew,
             "payload_kg": args.payload,
             "weight_kg": args.weight,
+            "fuel_available_kg": args.fuel_available,
             "range_km": args.range_km,
+            "solved_range_km": converged_record.get("range_km") if (fuel_mode and converged_record) else None,
             "reserve_frac": args.reserve_frac,
             "tol": args.tol,
             "relax": args.relax,
@@ -464,7 +546,8 @@ def run_loop(args: argparse.Namespace) -> dict[str, Any]:
             f"[cruise-match] CONVERGED: W_TO={converged_record['W_TO_kg']}kg "
             f"L/D={converged_record['L_over_D']} thrust=drag residual="
             f"{converged_record['thrust_drag_residual_n']}N "
-            f"block fuel={converged_record['block_fuel_kg']}kg",
+            f"block fuel={converged_record['block_fuel_kg']}kg"
+            + (f" range={converged_record['range_km']}km" if fuel_mode else ""),
             flush=True,
         )
     print(f"[cruise-match] status={status} ({stop_reason}); wrote {out_file}", flush=True)
