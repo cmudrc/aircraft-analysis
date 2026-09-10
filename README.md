@@ -13,18 +13,15 @@ analysis.
                 │  CPACS XML   │  ← single source of truth
                 │  (versioned) │
                 └──────┬───────┘
-       ┌───────────────┼───────────────┐───────────────┐
-       ▼               ▼               ▼               ▼
-  ┌─────────┐    ┌─────────┐    ┌──────────┐    ┌──────────┐
-  │ TiGL    │    │ SU2     │    │ pyCycle  │    │ Mission  │
-  │ MCP     │    │ MCP     │    │ MCP      │    │ MCP      │
-  │ v0.3.0  │    │ v0.3.0  │    │ v0.3.0   │    │ v0.2.0   │
-  └────┬────┘    └────┬────┘    └────┬─────┘    └────┬─────┘
-       │              │              │               │
-  Geometry       Aerodynamics    Engine Cycle    Mission/Traj
-  (wings,        (CL, CD,       (TSFC, Fn,     (fuel burn,
-   fuselages,     L/D)           OPR, BPR)      GTOW, range)
-   STEP export)
+        ┌─────────┬────┴─────┬──────────┬──────────┐
+        ▼         ▼          ▼          ▼          ▼
+   ┌────────┐ ┌────────┐ ┌─────────┐ ┌────────┐ ┌─────────┐
+   │ TiGL   │ │ SU2    │ │ pyCycle │ │ NSEG   │ │ Aviary  │
+   │ v0.4.0 │ │ v0.5.0 │ │ v0.3.0  │ │ v0.3.0 │ │ v0.1.0  │
+   └────────┘ └────────┘ └─────────┘ └────────┘ └─────────┘
+   Geometry   Euler CFD  Engine cycle Mission    Trajectory
+   (STEP,     (CL, CD,   (Fn, TSFC,  segments   optimisation
+   meshes)    L/D)        OPR, BPR)   (fuel)     (or NSEG, never both)
 ```
 
 ## CPACS Versioning
