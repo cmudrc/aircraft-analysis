@@ -38,7 +38,7 @@ if [ -d "$SU2_BIN" ] && [[ ":$PATH:" != *":$SU2_BIN:"* ]]; then
 fi
 
 # Ensure PYTHONPATH covers all packages
-export PYTHONPATH="${SCRIPT_DIR}:${SCRIPT_DIR}/tigl-mcp/src:${SCRIPT_DIR}/su2-mcp/src:${SCRIPT_DIR}/pycycle-mcp/src:${SCRIPT_DIR}/mission-mcp/src:${SCRIPT_DIR}/pipeline:${PYTHONPATH:-}"
+export PYTHONPATH="${SCRIPT_DIR}:${SCRIPT_DIR}/tigl-mcp/src:${SCRIPT_DIR}/su2-mcp/src:${SCRIPT_DIR}/pycycle-mcp/src:${SCRIPT_DIR}/nseg-mcp/src:${SCRIPT_DIR}/aviary-cpacs-mcp/src:${SCRIPT_DIR}/pipeline:${PYTHONPATH:-}"
 
 # ── Handle test modes ──
 case "${1:-}" in
