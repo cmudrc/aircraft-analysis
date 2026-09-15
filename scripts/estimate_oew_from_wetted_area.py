@@ -47,7 +47,11 @@ LB_PER_KG = 1.0 / 0.45359237
 FT2_PER_M2 = 1.0 / (0.3048 * 0.3048)
 
 METHOD = "OEW = K * A_wet (rule of thumb, Ron Engelbeck, Boeing, 2026-09)"
-NO_NACELLE_CAVEAT = "wetted area excludes engine nacelles and pylons if the CPACS file has none"
+NO_NACELLE_CAVEAT = (
+    "wetted area excludes engine nacelles and pylons because the CPACS file has none; "
+    "the class constant of about 12 lb/ft^2 assumes they are included (Boeing collaborator, "
+    "2026-09-15), so an uncalibrated estimate on this area is biased low"
+)
 
 MODEL_PATH = "vehicles/aircraft/model"
 AERO_NODE = "analysisResults/aero/wettedAreaM2"
@@ -206,7 +210,8 @@ def estimate_from_root(
         caveats.append(NO_NACELLE_CAVEAT)
     if calibration is None:
         caveats.append(
-            "K is a class constant (about 12 lb/ft^2 for conventional aluminium transports); "
+            "K is a class constant (about 12 lb/ft^2 for conventional aluminium transports, "
+            "wetted area including nacelles and pylons); "
             "calibrate it on a similar aircraft with a known OEW before relying on the number"
         )
     else:
