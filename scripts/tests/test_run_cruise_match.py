@@ -316,3 +316,88 @@ def test_fuel_available_mode_requires_oew_and_payload(tmp_path):
                          "--fuel-available", "8000", "--out", str(tmp_path / "out")])
     with pytest.raises(ValueError, match="--fuel-available needs --oew and --payload"):
         h.run_loop(args)
+
+
+# --------------------------------------------------------------------------
+# OEW from wetted area (added 2026-09-15): --oew-k-lb-ft2 instead of --oew
+# --------------------------------------------------------------------------
+_CPACS_WITH_WETTED_AREA = (
+    "<?xml version='1.0'?>"
+    "<cpacs><vehicles><aircraft><model>"
+    "<reference><area>122.4</area></reference>"
+    "<analysisResults><aero><wettedAreaM2>718.15</wettedAreaM2>"
+    "<wettedAreaSource>sum of the wall-marker faces of the SU2 mesh the run used</wettedAreaSource>"
+    "</aero></analysisResults>"
+    "</model></aircraft></vehicles></cpacs>"
+)
+
+
+def test_oew_k_flag_sets_oew_from_wetted_area_and_records_source(tmp_path, monkeypatch):
+    h = _load_harness()
+    cpacs = tmp_path / "wetted.xml"
+    cpacs.write_text(_CPACS_WITH_WETTED_AREA, encoding="utf-8")
+    _install_pyc(monkeypatch)
+    _install_nseg(monkeypatch, fuel_frac=0.15)
+
+    args = h.parse_args([
+        "--cpacs", str(cpacs), "--output-root", str(tmp_path / "out"),
+        "--cd0", "0.022", "--k", "0.045",
+        "--oew-k-lb-ft2", "12", "--payload", "18000", "--range-km", "3000",
+        "--reserve-frac", "0.05",
+    ])
+    doc = h.run_loop(args)
+
+    expected_oew = 12.0 * 718.15 * (1.0 / 0.3048**2) / (1.0 / 0.45359237)  # ~42,076 kg
+    assert doc["mode"] == "sizing"
+    assert doc["status"] == "converged"
+    assert doc["config"]["oew_kg"] == pytest.approx(expected_oew)
+    assert doc["config"]["oew_kg"] == pytest.approx(42076.0, abs=1.0)
+    src = doc["config"]["oew_source"]
+    assert src["method"] == "OEW = K * A_wet (rule of thumb, Ron Engelbeck, Boeing, 2026-09)"
+    assert src["k_lb_per_ft2"] == 12.0
+    assert src["wetted_area_m2"] == 718.15
+    assert src["wetted_area_source"].startswith("sum of the wall-marker faces")
+    assert src["wetted_area_node"].endswith("analysisResults/aero/wettedAreaM2")
+    assert any("nacelles" in c for c in src["caveats"])
+    # The estimated OEW is used exactly as --oew would be: same closed-form fixed point.
+    expected_w = (expected_oew + 18000.0) / (1.0 - 0.15 * 1.05)
+    assert doc["converged"]["W_TO_kg"] == pytest.approx(expected_w, rel=2e-3)
+
+
+def test_typed_oew_records_its_source_too(tmp_path, monkeypatch):
+    h = _load_harness()
+    cpacs = _write_cpacs(tmp_path)
+    _install_pyc(monkeypatch)
+    _install_nseg(monkeypatch, fuel_frac=0.15)
+    args = h.parse_args([
+        "--cpacs", str(cpacs), "--output-root", str(tmp_path / "out"),
+        "--cd0", "0.022", "--k", "0.045", "--oew", "42000", "--payload", "18000",
+    ])
+    doc = h.run_loop(args)
+    assert doc["config"]["oew_kg"] == 42000.0
+    assert doc["config"]["oew_source"] == {"method": "stated by the caller (--oew)"}
+
+
+def test_oew_and_oew_k_together_is_a_clear_conflict(tmp_path):
+    h = _load_harness()
+    cpacs = tmp_path / "wetted.xml"
+    cpacs.write_text(_CPACS_WITH_WETTED_AREA, encoding="utf-8")
+    args = h.parse_args([
+        "--cpacs", str(cpacs), "--output-root", str(tmp_path / "out"),
+        "--cd0", "0.022", "--k", "0.045",
+        "--oew", "42000", "--oew-k-lb-ft2", "12", "--payload", "18000",
+    ])
+    with pytest.raises(ValueError, match="either --oew or --oew-k-lb-ft2, not both"):
+        h.run_loop(args)
+
+
+def test_oew_k_flag_refuses_when_cpacs_states_no_wetted_area(tmp_path):
+    h = _load_harness()
+    cpacs = _write_cpacs(tmp_path)  # reference area only, no wettedAreaM2 / surfaceAreaM2
+    args = h.parse_args([
+        "--cpacs", str(cpacs), "--output-root", str(tmp_path / "out"),
+        "--cd0", "0.022", "--k", "0.045", "--oew-k-lb-ft2", "12", "--payload", "18000",
+    ])
+    with pytest.raises(ValueError, match="states no wetted area"):
+        h.run_loop(args)
+    assert not (tmp_path / "out" / "cruise_match_history.json").exists()

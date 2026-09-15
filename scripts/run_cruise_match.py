@@ -46,6 +46,14 @@ Every bisection step runs the real pyCycle and NSEG solvers::
     python scripts/run_cruise_match.py --cpacs D150_v30.xml --cd0 0.0164 --k 0.0398 \\
         --oew 42000 --payload 18000 --fuel-available 11000
 
+OEW may be estimated instead of typed in. ``--oew-k-lb-ft2 12`` reads the
+wetted area the SU2 or TiGL server recorded in the CPACS file and uses
+``OEW = K * A_wet`` (Ron Engelbeck's rule of thumb, Boeing, 2026-09: K about
+12 lb/ft^2 for conventional aluminium transports; see
+``estimate_oew_from_wetted_area.py``). A file with no recorded wetted area is
+a structured error, not a guess. The history records where the OEW came from
+under ``config.oew_source``.
+
 Example (sizing mode)::
 
     python scripts/run_cruise_match.py \\
@@ -139,6 +147,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     # Weight definition. Sizing mode: --oew + --payload. Match mode: --weight.
     p.add_argument("--oew", type=float, default=None, help="Operating empty weight [kg].")
+    p.add_argument("--oew-k-lb-ft2", type=float, default=None,
+                   help="Alternative to --oew: estimate OEW = K x A_wet from the wetted area the "
+                        "SU2 or TiGL server recorded in the CPACS file, with this K [lb/ft^2] "
+                        "(Ron Engelbeck's rule of thumb; about 12 for conventional aluminium "
+                        "transports). Errors if the file states no wetted area.")
     p.add_argument("--payload", type=float, default=None, help="Payload [kg].")
     p.add_argument("--weight", type=float, default=None,
                    help="Fixed takeoff weight [kg] (match mode; alternative to --oew/--payload).")
@@ -300,6 +313,43 @@ def _build_polar(args: argparse.Namespace, xml: str, out_root: Path) -> dict[str
     return {"cd0": cd0, "k": k, "source": "su2", "points": raw}
 
 
+def _resolve_oew(args: argparse.Namespace,
+                 cpacs_path: Path) -> tuple[float | None, dict[str, Any] | None]:
+    """Operating empty weight [kg] and where it came from.
+
+    Either typed in (``--oew``) or estimated from the CPACS wetted area as
+    ``K * A_wet`` with the caller's K (``--oew-k-lb-ft2``; Ron Engelbeck's rule
+    of thumb, via ``estimate_oew_from_wetted_area.py``). Both at once is a
+    conflict. Neither leaves OEW unset, which is fine in match mode and is
+    caught by the sizing checks in ``run_loop``. The estimator refuses with a
+    structured error (a ValueError) when the file states no wetted area.
+    """
+    if args.oew is not None and args.oew_k_lb_ft2 is not None:
+        raise ValueError("Give either --oew or --oew-k-lb-ft2, not both: one states the OEW, "
+                         "the other estimates it from the wetted area.")
+    if args.oew is not None:
+        return float(args.oew), {"method": "stated by the caller (--oew)"}
+    if args.oew_k_lb_ft2 is None:
+        return None, None
+
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import estimate_oew_from_wetted_area as oew_est
+
+    est = oew_est.estimate_oew(cpacs_path, k_lb_ft2=float(args.oew_k_lb_ft2))
+    print(
+        f"[cruise-match] OEW {est['oew_kg']:.1f} kg = {est['k_lb_per_ft2']:g} lb/ft^2 x "
+        f"{est['wetted_area_m2']:.3f} m^2 wetted area ({est['wetted_area_node']})",
+        flush=True,
+    )
+    source = {key: est[key] for key in (
+        "method", "k_lb_per_ft2", "k_source", "wetted_area_m2", "wetted_area_source",
+        "wetted_area_node", "caveats",
+    )}
+    return float(est["oew_kg"]), source
+
+
 def run_loop(args: argparse.Namespace) -> dict[str, Any]:
     """Execute the cruise-match fixed point and return the history document."""
     import nseg_mcp.cpacs_adapter as nseg
@@ -314,15 +364,19 @@ def run_loop(args: argparse.Namespace) -> dict[str, Any]:
     if not (0.0 < args.relax <= 1.0):
         raise ValueError("--relax must be in (0, 1].")
 
+    oew_kg, oew_source = _resolve_oew(args, cpacs_path)
+
     fuel_mode = args.fuel_available is not None
-    sizing = (not fuel_mode) and args.oew is not None and args.payload is not None
-    if fuel_mode and (args.oew is None or args.payload is None):
-        raise ValueError("--fuel-available needs --oew and --payload.")
+    sizing = (not fuel_mode) and oew_kg is not None and args.payload is not None
+    if fuel_mode and (oew_kg is None or args.payload is None):
+        raise ValueError("--fuel-available needs --oew and --payload "
+                         "(--oew-k-lb-ft2 may stand in for --oew).")
     if fuel_mode and args.fuel_available <= 0:
         raise ValueError("--fuel-available must be positive.")
     if not fuel_mode and not sizing and args.weight is None:
-        raise ValueError("Provide --oew and --payload (sizing), --weight (match mode), "
-                         "or --fuel-available with --oew and --payload (fuel-available mode).")
+        raise ValueError("Provide --oew (or --oew-k-lb-ft2) and --payload (sizing), --weight "
+                         "(match mode), or --fuel-available with --oew and --payload "
+                         "(fuel-available mode).")
     mode = "fuel_available" if fuel_mode else ("sizing" if sizing else "match")
 
     out_root = Path(args.output_root).resolve()
@@ -350,7 +404,7 @@ def run_loop(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     if sizing or fuel_mode:
-        oew, payload = float(args.oew), float(args.payload)
+        oew, payload = float(oew_kg), float(args.payload)
     else:
         oew = payload = None
 
@@ -525,7 +579,8 @@ def run_loop(args: argparse.Namespace) -> dict[str, Any]:
             "mach": args.mach,
             "altitude_ft": args.altitude,
             "ref_area_m2": S,
-            "oew_kg": args.oew,
+            "oew_kg": oew_kg,
+            "oew_source": oew_source,
             "payload_kg": args.payload,
             "weight_kg": args.weight,
             "fuel_available_kg": args.fuel_available,
