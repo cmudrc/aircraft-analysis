@@ -95,7 +95,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     # Refinement ladder
     p.add_argument("--start-density", type=int, default=30,
-                   help="surface_density for rung 1 (default 30).")
+                   help="surface_density for rung 1 (default 30); ignored when "
+                        "--chord-cells-start is given.")
+    p.add_argument("--chord-cells-start", type=int, default=None,
+                   help="Define rungs by cells across the reference chord instead of "
+                        "across the span: rung 1 uses a surface cell size of "
+                        "REF_LENGTH / N metres (REF_LENGTH read from the CPACS "
+                        "reference/length), and --growth multiplies N each rung.")
     p.add_argument("--growth", type=float, default=2.0,
                    help="Multiplier applied to surface_density each rung (default 2.0).")
     p.add_argument("--max-rungs", type=int, default=5,
@@ -124,6 +130,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def _next_chord_cells(current: int, growth: float) -> int:
+    """Next rung's cells-across-chord count, always strictly greater."""
+    return max(int(round(current * growth)), current + 1)
+
+
 def _next_density(current: int, growth: float) -> int:
     """Compute the next rung's surface_density.
 
@@ -144,7 +155,8 @@ def _projected_n_elem(history: list[dict[str, Any]], next_density: int) -> int |
         return None
     last = history[-1]
     last_n = last.get("mesh_n_elem")
-    last_d = last.get("surface_density")
+    # either level definition: cells across the chord or the span-relative density
+    last_d = last.get("chord_cells") or last.get("surface_density")
     if not isinstance(last_n, int) or not isinstance(last_d, int) or last_d <= 0:
         return None
     ratio = next_density / last_d
@@ -166,8 +178,13 @@ def _plateaued(prev: dict[str, Any], last: dict[str, Any], tol: float) -> tuple[
 
 
 def _print_rung(rec: dict[str, Any]) -> None:
+    level = (
+        f"chord_cells={rec['chord_cells']:>4d} (size {rec['surface_size_m']:.4f} m)"
+        if rec.get("chord_cells")
+        else f"density={rec['surface_density']:>5d}"
+    )
     print(
-        f"  rung {rec['rung']}: density={rec['surface_density']:>5d}  "
+        f"  rung {rec['rung']}: {level}  "
         f"n_elem={rec.get('mesh_n_elem')!s:>9}  "
         f"CL={rec.get('CL')!s:>8}  CD={rec.get('CD')!s:>8}  "
         f"L/D={rec.get('L_over_D')!s:>7}  "
@@ -202,19 +219,39 @@ def run_loop(args: argparse.Namespace) -> dict[str, Any]:
 
     history: list[dict[str, Any]] = []
     density = int(args.start_density)
+    chord_mode = args.chord_cells_start is not None
+    chord_cells = int(args.chord_cells_start) if chord_mode else None
+    ref_length_m = None
+    if chord_mode:
+        if chord_cells <= 0:
+            raise ValueError("--chord-cells-start must be a positive integer")
+        ref_length_m = a.read_from_cpacs(xml, fc).get("ref_length_m")
+        if not ref_length_m or ref_length_m <= 0:
+            raise ValueError(
+                "CPACS reference/length is missing; cells-across-chord rungs need it"
+            )
     wall_start = time.time()
     status = "budget_exhausted"
     stop_reason = "max_rungs"
 
+    level_note = (
+        f"chord_cells={chord_cells} (REF_LENGTH={ref_length_m} m)"
+        if chord_mode
+        else f"density={density}"
+    )
     print(
-        f"[converge] start: density={density}, growth={args.growth}, "
+        f"[converge] start: {level_note}, growth={args.growth}, "
         f"max_rungs={args.max_rungs}, max_wall={args.max_wall_seconds}s, "
         f"plateau_tol={args.plateau_tol}",
         flush=True,
     )
 
     for rung_idx in range(1, int(args.max_rungs) + 1):
-        rung_dir = out_root / f"rung_{rung_idx:02d}_density_{density}"
+        surface_size_m = (ref_length_m / chord_cells) if chord_mode else None
+        rung_dir = out_root / (
+            f"rung_{rung_idx:02d}_chord_{chord_cells}" if chord_mode
+            else f"rung_{rung_idx:02d}_density_{density}"
+        )
         rung_dir.mkdir(parents=True, exist_ok=True)
         rung_start = time.time()
 
@@ -231,7 +268,8 @@ def run_loop(args: argparse.Namespace) -> dict[str, Any]:
                 mesh_path=use_mesh,
                 output_dir=str(rung_dir),
                 preset="industry",
-                surface_density=density,
+                surface_density=None if chord_mode else density,
+                surface_size_m=surface_size_m,
                 iter_cap=int(args.iter_cap),
                 cl_convergence_eps=float(args.cl_eps),
                 wall_timeout_seconds=int(args.per_rung_timeout),
@@ -239,7 +277,9 @@ def run_loop(args: argparse.Namespace) -> dict[str, Any]:
         except Exception as exc:
             rec = {
                 "rung": rung_idx,
-                "surface_density": density,
+                "surface_density": None if chord_mode else density,
+                "chord_cells": chord_cells,
+                "surface_size_m": surface_size_m,
                 "error": {"type": "adapter_exception", "message": str(exc)},
                 "runtime_seconds": round(time.time() - rung_start, 2),
             }
@@ -251,7 +291,10 @@ def run_loop(args: argparse.Namespace) -> dict[str, Any]:
 
         rec = {
             "rung": rung_idx,
-            "surface_density": density,
+            "surface_density": None if chord_mode else density,
+            "chord_cells": chord_cells,
+            "surface_size_m": surface_size_m,
+            "mesh_wall_faces": summary.get("mesh_wall_faces"),
             "mesh_n_elem": summary.get("mesh_n_elem"),
             "CL": summary.get("CL"),
             "CD": summary.get("CD"),
@@ -288,7 +331,10 @@ def run_loop(args: argparse.Namespace) -> dict[str, Any]:
             stop_reason = "max_wall_seconds"
             break
 
-        next_density = _next_density(density, args.growth)
+        next_density = (
+            _next_chord_cells(chord_cells, args.growth) if chord_mode
+            else _next_density(density, args.growth)
+        )
         projected = _projected_n_elem(history, next_density)
         if projected is not None and projected > args.max_n_elem:
             status = "budget_exhausted"
@@ -300,7 +346,10 @@ def run_loop(args: argparse.Namespace) -> dict[str, Any]:
             )
             break
 
-        density = next_density
+        if chord_mode:
+            chord_cells = next_density
+        else:
+            density = next_density
 
     history_doc = {
         "status": status,
@@ -316,7 +365,10 @@ def run_loop(args: argparse.Namespace) -> dict[str, Any]:
             "altitude_ft": args.altitude,
             "plateau_tol": args.plateau_tol,
             "growth": args.growth,
-            "start_density": int(args.start_density),
+            "start_density": None if chord_mode else int(args.start_density),
+            "chord_cells_start": int(args.chord_cells_start) if chord_mode else None,
+            "ref_length_m": ref_length_m,
+            "level_definition": "cells_across_chord" if chord_mode else "span_over_density",
             "max_rungs": int(args.max_rungs),
             "max_wall_seconds": int(args.max_wall_seconds),
             "max_n_elem": int(args.max_n_elem),
