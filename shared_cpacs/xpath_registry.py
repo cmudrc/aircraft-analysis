@@ -16,6 +16,7 @@ class MCPDomain(str, Enum):
     SU2 = "su2"
     PYCYCLE = "pycycle"
     MISSION = "mission"
+    OAS = "oas"
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,17 @@ _REGISTRY: dict[MCPDomain, DomainPaths] = {
         ),
         writes=(
             ".//vehicles/engines/engine/analysis/mcpResults",
+        ),
+    ),
+    MCPDomain.OAS: DomainPaths(
+        reads=(
+            ".//vehicles/aircraft/model/reference",
+            ".//vehicles/aircraft/model/wings",
+            ".//vehicles/profiles/wingAirfoils",
+            ".//missions/mission/segments",
+        ),
+        writes=(
+            ".//vehicles/aircraft/model/analysisResults/oas",
         ),
     ),
     MCPDomain.MISSION: DomainPaths(
