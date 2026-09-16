@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -145,11 +146,14 @@ def _next_density(current: int, growth: float) -> int:
 
 
 def _projected_n_elem(history: list[dict[str, Any]], next_density: int) -> int | None:
-    """Project the next rung's cell count from the most recent rung.
+    """Project the next rung's cell count from the rungs already run.
 
-    Surface elements scale ~quadratically with density; volume cells
-    scale ~cubically. We use the cubic estimate (the conservative one
-    for memory) when the latest rung returned ``mesh_n_elem``.
+    With two or more rungs the growth exponent is measured from the last pair
+    (cells ~ level^p) instead of assumed: on the geometries run so far p is
+    close to 1.7, not the 3.0 a cubic assumption implies, and assuming cubic
+    stops a ladder one rung earlier than the budget actually requires. The
+    exponent is clamped to [1.5, 3.0] so a noisy pair cannot license a run that
+    is far larger than projected.
     """
     if not history:
         return None
@@ -159,8 +163,22 @@ def _projected_n_elem(history: list[dict[str, Any]], next_density: int) -> int |
     last_d = last.get("chord_cells") or last.get("surface_density")
     if not isinstance(last_n, int) or not isinstance(last_d, int) or last_d <= 0:
         return None
+    exponent = 3.0
+    if len(history) >= 2:
+        prev = history[-2]
+        prev_n = prev.get("mesh_n_elem")
+        prev_d = prev.get("chord_cells") or prev.get("surface_density")
+        if (
+            isinstance(prev_n, int)
+            and isinstance(prev_d, int)
+            and prev_d > 0
+            and prev_n > 0
+            and last_d != prev_d
+        ):
+            measured = math.log(last_n / prev_n) / math.log(last_d / prev_d)
+            exponent = min(3.0, max(1.5, measured))
     ratio = next_density / last_d
-    return int(last_n * (ratio ** 3))
+    return int(last_n * (ratio ** exponent))
 
 
 def _plateaued(prev: dict[str, Any], last: dict[str, Any], tol: float) -> tuple[bool, float, float]:
